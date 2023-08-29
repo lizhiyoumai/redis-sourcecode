@@ -2063,9 +2063,14 @@ void initServer(void) {
     server.clients_paused = 0;
     server.system_memory_size = zmalloc_get_memory_size();
 
+    // 创建共享对象，包括常见的回复信息(OK/ERR)，常见的错误信息以及0-10000的整数
     createSharedObjects();
+
     adjustOpenFilesLimit();
+
+    // 创建事件循环框架，aeApiCreate（比如linux系统就会调用epoll_create）
     server.el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
+
     if (server.el == NULL) {
         serverLog(LL_WARNING,
             "Failed creating the event loop. Error message: '%s'",
@@ -2075,6 +2080,7 @@ void initServer(void) {
     server.db = zmalloc(sizeof(redisDb)*server.dbnum);
 
     /* Open the TCP listening socket for the user commands. */
+    // 监听设置的网络端口
     if (server.port != 0 &&
         listenToPort(server.port,server.ipfd,&server.ipfd_count) == C_ERR)
         exit(1);
@@ -2098,6 +2104,7 @@ void initServer(void) {
     }
 
     /* Create the Redis databases, and initialize other internal state. */
+    // 依次为每个数据库创建相应的数据结构
     for (j = 0; j < server.dbnum; j++) {
         server.db[j].dict = dictCreate(&dbDictType,NULL);
         server.db[j].expires = dictCreate(&keyptrDictType,NULL);
@@ -2108,6 +2115,7 @@ void initServer(void) {
         server.db[j].avg_ttl = 0;
         server.db[j].defrag_later = listCreate();
     }
+    //LRU 用于淘汰的候选key集合
     evictionPoolAlloc(); /* Initialize the LRU keys pool. */
     server.pubsub_channels = dictCreate(&keylistDictType,NULL);
     server.pubsub_patterns = listCreate();
@@ -2147,6 +2155,7 @@ void initServer(void) {
     /* Create the timer callback, this is our way to process many background
      * operations incrementally, like clients timeout, eviction of unaccessed
      * expired keys and so forth. */
+    // 创建计时器回调，用于增量处理一些后台操作，比如客户端超时，驱逐未访问的过期的keys
     if (aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL) == AE_ERR) {
         serverPanic("Can't create event loop timers.");
         exit(1);
@@ -2154,6 +2163,12 @@ void initServer(void) {
 
     /* Create an event handler for accepting new connections in TCP and Unix
      * domain sockets. */
+    // 为每一个监听的IP设置连接事件的处理函数acceptTcpHandler（客户端连接请求会触发）
+    // 注册要监听的事件类型，以及对应的事件处理函数，aeApiAddEvent（linux系统会调用epoll_ctl）
+    // acceptTcpHandler逻辑：
+    // 创建已连接套接字-->acceptCommonHandler-->createClient-->aeCreateFileEvent
+    // aeCreateFileEvent函数会针对已连接套接字上，创建监听事件，类型为AE_READABLE，
+    // 回调函数是 readQueryFromClient（在 networking.c 文件中）
     for (j = 0; j < server.ipfd_count; j++) {
         if (aeCreateFileEvent(server.el, server.ipfd[j], AE_READABLE,
             acceptTcpHandler,NULL) == AE_ERR)
@@ -4223,6 +4238,8 @@ int main(int argc, char **argv) {
     struct timeval tv;
     int j;
 
+    // 如果定义了 REDIS_TEST 宏定义，并且 Redis server 启动时的参数符合测试参数，
+    // 那么 main 函数就会执行相应的测试程序。
 #ifdef REDIS_TEST
     if (argc == 3 && !strcasecmp(argv[1], "test")) {
         if (!strcasecmp(argv[2], "ziplist")) {
@@ -4253,6 +4270,7 @@ int main(int argc, char **argv) {
 #ifdef INIT_SETPROCTITLE_REPLACEMENT
     spt_init(argc, argv);
 #endif
+    // 基本初始化，包括设置时区，设置hash函数的随机种子等
     setlocale(LC_COLLATE,"");
     tzset(); /* Populates 'timezone' global. */
     zmalloc_set_oom_handler(redisOutOfMemoryHandler);
@@ -4263,7 +4281,10 @@ int main(int argc, char **argv) {
     getRandomHexChars(hashseed,sizeof(hashseed));
     dictSetHashFunctionSeed((uint8_t*)hashseed);
     server.sentinel_mode = checkForSentinelMode(argc,argv);
+
+    // 为各种参数设置默认值
     initServerConfig();
+
     moduleInitModulesSystem();
 
     /* Store the executable path and arguments in a safe place in order
@@ -4276,6 +4297,7 @@ int main(int argc, char **argv) {
     /* We need to init sentinel right now as parsing the configuration file
      * in sentinel mode will have the effect of populating the sentinel
      * data structures with master nodes to monitor. */
+    // 检查哨兵模式
     if (server.sentinel_mode) {
         initSentinelConfig();
         initSentinel();
@@ -4284,6 +4306,7 @@ int main(int argc, char **argv) {
     /* Check if we need to start in redis-check-rdb/aof mode. We just execute
      * the program main. However the program is part of the Redis executable
      * so that we can easily execute an RDB check on loading errors. */
+    // 检查是否要执行 RDB 检测或 AOF 检测
     if (strstr(argv[0],"redis-check-rdb") != NULL)
         redis_check_rdb_main(argc,argv,NULL);
     else if (strstr(argv[0],"redis-check-aof") != NULL)
@@ -4351,6 +4374,8 @@ int main(int argc, char **argv) {
             exit(1);
         }
         resetServerSaveParams();
+        // main 函数会对命令行传入的参数进行解析，并且调用 loadServerConfig 函数，
+        // 对命令行参数和配置文件中的参数进行合并处理，然后为 Redis 各功能模块的关键参数设置合适的取值
         loadServerConfig(configfile,options);
         sdsfree(options);
     }
@@ -4371,15 +4396,23 @@ int main(int argc, char **argv) {
     }
 
     server.supervised = redisIsSupervised(server.supervised_mode);
+
+    // 以守护进程的方式运行，会fork出一个子进程继续执行main函数的逻辑
     int background = server.daemonize && !server.supervised;
     if (background) daemonize();
 
+    // 核心！！！对server运行时的各种资源进行初始化工作
+    // 主要包括了 server 资源管理所需的数据结构初始化、键值对数据库初始化、server 网络框架初始化等
     initServer();
+
     if (background || server.pidfile) createPidFile();
     redisSetProcTitle(argv[0]);
     redisAsciiArt();
     checkTcpBacklogSettings();
 
+    // 在调用完 initServer 后，还会再次判断当前 server 是否为哨兵模式。
+    // 如果是哨兵模式，main 函数会调用 sentinelIsRunning 函数，设置启动哨兵模式。
+    // 否则的话，main 函数会调用 loadDataFromDisk 函数，从磁盘上加载 AOF 或者是 RDB 文件，以便恢复之前的数据。
     if (!server.sentinel_mode) {
         /* Things not needed when running in Sentinel mode. */
         serverLog(LL_WARNING,"Server initialized");
@@ -4429,7 +4462,10 @@ int main(int argc, char **argv) {
 
     aeSetBeforeSleepProc(server.el,beforeSleep);
     aeSetAfterSleepProc(server.el,afterSleep);
+
+    // 为了能高效处理高并发的客户端连接请求，Redis 采用了事件驱动框架，来并发处理不同客户端的连接和读写请求。
     aeMain(server.el);
+
     aeDeleteEventLoop(server.el);
     return 0;
 }

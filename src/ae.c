@@ -355,6 +355,9 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
  * the events that's possible to process without to wait are processed.
  *
  * The function returns the number of events processed. */
+// 情况一：既没有时间事件，也没有网络事件；
+// 情况二：有 IO 事件或者有需要紧急处理的时间事件；
+// 情况三：只有普通的时间事件。
 int aeProcessEvents(aeEventLoop *eventLoop, int flags)
 {
     int processed = 0, numevents;
@@ -408,6 +411,7 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
 
         /* Call the multiplexing API, will return only on timeout or when
          * some event fires. */
+        // 返回已经准备就绪的文件描述符，aeApiPoll（linux系统会调用epoll_wait）
         numevents = aeApiPoll(eventLoop, tvp);
 
         /* After sleep callback. */
@@ -497,6 +501,7 @@ void aeMain(aeEventLoop *eventLoop) {
     eventLoop->stop = 0;
     while (!eventLoop->stop) {
         if (eventLoop->beforesleep != NULL)
+            //
             eventLoop->beforesleep(eventLoop);
         aeProcessEvents(eventLoop, AE_ALL_EVENTS|AE_CALL_AFTER_SLEEP);
     }
